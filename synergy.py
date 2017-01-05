@@ -4,7 +4,6 @@ import json
 import requests
 import websockets
 import os
-import Smelter
 import aiohttp
 from typing import List, Dict, Tuple, Set
 
@@ -60,8 +59,8 @@ class Client:
 
 
 class Room:
-	def __init__(self, synergy: 'Synergy', room_name: str):
-		self.synergy = synergy  # type: Synergy
+	def __init__(self, synergy: 'SynergyServer', room_name: str):
+		self.synergy = synergy  # type: SynergyServer
 		self.name = room_name
 		self.member_aids = set()  # type: Set[str]
 
@@ -117,20 +116,98 @@ class Room:
 		])
 
 
-class Synergy:
+class Master:
+	def __init__(self, socket, synergy: 'SynergyServer'):
+		self.socket = socket
+		self.synergy = synergy
+		self.aid = None
+		self.username = None
+		self.privileges = None
+		self.authenticated = False
+
+	async def send_dict(self, x: dict):
+		await self.socket.send(dumps(x))
+
+	async def register(self, request: dict) -> None:
+		if self.authenticated is False:
+			alleged_aid = request.get('aid', None)
+			if alleged_aid is not None:
+				alleged_aid = alleged_aid  # type: str
+				auth_server_response = await self.synergy.get_username(alleged_aid)
+				if auth_server_response.get('valid_aid', False):
+					self.username = auth_server_response.get('username', '')
+					self.aid = alleged_aid
+					auth_server_response = await self.synergy.get_privileges(self.aid)
+					self.privileges = auth_server_response.get('privileges', {})
+					if self.privileges.get('Synergy', {}).get('canBeMaster', False):
+						self.authenticated = True
+		await self.send_dict({
+			'authenticated': self.authenticated
+		})
+		return
+
+	async def create_room(self, request: dict) -> None:
+		if self.authenticated:
+			room_name = request.get('room_name', None)
+			default_room = request.get('default_room', False)
+			if type(room_name) == str and type(default_room) == bool:
+				self.synergy.create_room(room_name, default_room)
+		return
+
+	async def add_to_room(self, request: dict) -> None:
+		if self.authenticated:
+			room_name = request.get('room_name', None)
+			aid = request.get('aid', None)
+			if type(room_name) == str and type(aid) == str:
+				aid = aid  # type: str
+				room = self.synergy.rooms.get(room_name, None)
+				if type(room) == Room:
+					room = room  # type: Room
+					room.add_member(aid)
+		return
+
+	async def room_list(self, request: dict) -> None:
+		if self.authenticated:
+			await self.send_dict({
+				'route': 'room_list',
+				'rooms': self.synergy.get_rooms()
+			})
+		return
+
+	async def on_message(self, string: str):
+		request = loads(string)
+		print(request)
+
+		routes = {
+			'register': self.register,
+			'create_room': self.create_room,
+			'room_list': self.room_list,
+			'add_to_room': self.add_to_room
+		}
+		"""
+		if request.get('route', None) is not None:
+			try:
+				await routes[request['route']](request)
+			except:
+				pass
+		"""
+		route = request.get('route', None)
+		if route == 'register':
+			await self.register(request)
+		elif route == 'create_room':
+			await self.create_room(request)
+		elif route == 'room_list':
+			await self.room_list(request)
+		elif route == 'add_to_room':
+			await self.add_to_room(request)
+
+class SynergyServer:
 	def __init__(self, client_port=4545, master_port=4546, authentication_server_address='http://localhost:7004'):
 		"""
 		Library for creating chat systems for games.
 		:param client_port: The port for the client websocket connections
 		:param master_port: The port for the websocket connection used for managing Synergy (creating/removing rooms, adding/removing clients from rooms)
 		:param authentication_server_address: The address of the authentication server, explained below.
-		Get requests are sent to authentication_server_address/get/username with the url param "aid" with the aid key.
-		An example url would be: http://localhost:7004/get/username?aid=c9f93756-2ff6-40aa-8824-2409d7113818
-		Synergy expects a stringified json response in the format. This will be much more flexible in the future.
-		{
-			"valid_aid": true,
-			"username": "JCharante"
-		}
 		"""
 		self.rooms = {}
 		self.default_rooms = {}
@@ -146,6 +223,9 @@ class Synergy:
 		Starts the websocket server
 		:return:
 		"""
+
+		print("Starting Websocket Server on port {}".format(self.client_port))
+
 		start_server = websockets.serve(self.on_new_connection, 'localhost', self.client_port)
 
 		asyncio.get_event_loop().run_until_complete(start_server)
@@ -153,13 +233,32 @@ class Synergy:
 
 	async def get_username(self, aid: str) -> dict:
 		"""
-		Sends a get request to /get/username of the supplied auth server address with the aid as a url encoded param
+		Sends GET /users/<aid>/username
 		:param aid: The aid of the user you'd like the username of
+		:return: The server response, shown below the docstring
+		"""
+
+		"""
+		Expected Server Response:
+		{
+			"valid_aid": bool,
+			"username": str
+		}
+		"""
+
+		async with aiohttp.ClientSession() as session:
+			async with session.get(f'{self.authentication_server_address}/users/{aid}/username') as resp:
+				return loads(await resp.text())
+
+	async def get_privileges(self, aid: str) -> dict:
+		"""
+		Sends GET /users/<aid>/privileges
+		:param aid: The aid of the user you'd like to privileges of
 		:return:
 		"""
-		url_encoded_params = [('aid', aid)]
+
 		async with aiohttp.ClientSession() as session:
-			async with session.get(self.authentication_server_address + '/get/username', params=url_encoded_params) as resp:
+			async with session.get(f'{self.authentication_server_address}/users/{aid}/privileges') as resp:
 				return loads(await resp.text())
 
 	def get_rooms_client_is_in(self, client: Client) -> List[str]:
@@ -185,7 +284,7 @@ class Synergy:
 
 	async def add_authenticated_client(self, client: Client):
 		"""
-		Add a client once authenticated, where the clent is then in a position to be controlled by the master ws.
+		Add a client once authenticated, where the client is then in a position to be controlled by the master ws.
 		:param client:
 		:return:
 		"""
@@ -195,44 +294,61 @@ class Synergy:
 		await client.send_room_mapping(rooms_client_is_in)
 
 	async def on_new_connection(self, websocket, path):
-		aid = None
-		client = None
-		try:
-			while True:
-				string = await websocket.recv()
-				if aid is None:
-					# Client is not authenticated
-					request = loads(string)
-					request_type = request.get('request', '')
-					if request_type == 'authenticate':
-						alleged_aid = request.get('aid', '')
+		if path == '/client':
+			print(f'New Client connection | {websocket.remote_address}')
+			aid = None
+			client = None
+			try:
+				while True:
+					string = await websocket.recv()
+					if aid is None:
+						# Client is not authenticated
+						request = loads(string)
+						request_type = request.get('request', '')
+						if request_type == 'authenticate':
+							alleged_aid = request.get('aid', '')
 
-						authentication_server_response = await self.get_username(alleged_aid)
-						valid_aid = authentication_server_response.get('valid_aid', False)
-						username = authentication_server_response.get('username', '')
+							authentication_server_response = await self.get_username(alleged_aid)
+							valid_aid = authentication_server_response.get('valid_aid', False)
+							username = authentication_server_response.get('username', '')
 
-						if valid_aid is not False and username != '':
-							aid = alleged_aid
-							client = Client(websocket, aid, username)
-							await client.send_authentication_success_message()
-							await self.add_authenticated_client(client)
-				else:
-					# Client is authenticated
-					request = loads(string)
-					request_type = request.get('request', '')
+							if valid_aid is not False and username != '':
+								aid = alleged_aid
+								client = Client(websocket, aid, username)
+								await client.send_authentication_success_message()
+								await self.add_authenticated_client(client)
+					else:
+						# Client is authenticated
+						request = loads(string)
+						request_type = request.get('request', '')
 
-					if request_type == 'send_message':
-						room_name = request.get('room', '')
-						message = request.get('message', '')
+						if request_type == 'send_message':
+							room_name = request.get('room', '')
+							message = request.get('message', '')
 
-						room = self.rooms.get(room_name, None)
-						if room is not None:
-							room = room  # type: Room
-							if room.is_in_room_by_aid(client.aid):
-								await room.send_message(client, message)
-		finally:
-			if aid is not None:
-				self.connected_clients.pop(aid, None)
+							room = self.rooms.get(room_name, None)
+							if room is not None:
+								room = room  # type: Room
+								if room.is_in_room_by_aid(client.aid):
+									await room.send_message(client, message)
+			except:
+				# This pass statement stops our console from being spammed by exceptions when a connection closes normally.
+				pass
+			finally:
+				print(f'Closed Client Connection | {websocket.remote_address}')
+				if aid is not None:
+					self.connected_clients.pop(aid, None)
+		elif path == '/master':
+			print(f'New Master connection | {websocket.remote_address}')
+			master = Master(websocket, self)
+			try:
+				while True:
+					string = await websocket.recv()
+					await master.on_message(string)
+			except:
+				pass
+			finally:
+				print(f'Master Connection Closed | {websocket.remote_address}')
 
 	def create_room(self, room_name, default_room=False):
 		"""
@@ -247,3 +363,65 @@ class Synergy:
 
 		if default_room:
 			self.default_rooms[room_name] = room
+
+	def get_rooms(self) -> List[str]:
+		return [room_name for room_name in self.rooms]
+
+"""
+class SynergyClient:
+	def __init__(self, synergy_address: str, aid: str):
+		self.synergy_address = synergy_address
+		self.aid = aid
+		self.socket = None
+		self.authenticated = False
+		self.room_list = None
+
+	async def create_room(self, room_name: str):
+		await self.send_dict({
+			'route': 'create_room',
+			'room_name': room_name
+		})
+
+	async def add_to_room(self, room_name: str, aid: str):
+		await self.send_dict({
+			'route': 'add_to_room',
+			'aid': aid,
+			'room_name': room_name
+		})
+
+	async def get_rooms(self) -> List[str]:
+		await self.send_dict({
+			'route': 'get_rooms'
+		})
+		await asyncio.sleep(0.25)
+		return self.room_list
+
+	async def send_dict(self, x: dict) -> None:
+		await self.socket.send(dumps(x))
+		return
+
+	async def client(self):
+		async with websockets.connect(self.synergy_address) as websocket:
+			try:
+				self.socket = websocket
+
+				while self.authenticated is False:
+					await self.send_dict({
+						'route': 'register',
+						'aid': self.aid
+					})
+					string = await websocket.recv()
+					response = loads(string)
+					print(response)
+					if response.get('authenticated', False):
+						self.authenticated = True
+
+				while True:
+					string = await websocket.recv()
+					request = loads(string)
+
+					if request.get('route', None) == 'room_list':
+						self.room_list = request.get('rooms', [])
+			finally:
+				print("Connection to Synergy Closed")
+"""
