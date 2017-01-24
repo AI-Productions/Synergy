@@ -209,7 +209,7 @@ $(document).ready(function() {
 
 		var message = JSON.stringify({
 			aid: $('#aid').val(),
-			request: 'register'
+			request: 'authenticate'
 		});
 
 		ws.send(message);
@@ -220,6 +220,7 @@ $(document).ready(function() {
 		console.log('CLOSED: ' + serverUrl.val());
 		ws = null;
 		close();
+		addMessage('--- Connection Closed ---', 'RECEIVED');
 	};
 
 	var onMessage = function(event) {
