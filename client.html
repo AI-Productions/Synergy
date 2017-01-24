@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+	<title>Simple Web Socket Client</title>
+	<link rel="stylesheet" type="text/css" href="chrome-extension://pfdhoblngboilpfeibdedpjgfnlcodoo/css/reset.css">
+	<!-- Latest compiled and minified CSS -->
+	<link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css" integrity="sha384-BVYiiSIFeK1dGmJRAkycuHAHRg32OmUcww7on3RYdg4Va+PmSTsz/K68vbdEjh4u" crossorigin="anonymous">
+
+	<!-- Optional theme -->
+	<link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap-theme.min.css" integrity="sha384-rHyoN1iRsVXV4nD0JutlnGaslCJuC7uwjduW9SVrLvRYooPp2bWYgmgJQIXwl/Sp" crossorigin="anonymous">
+
+	<style>
+		body {
+			width: 100%;
+			font-family: font-family:'ヒラギノ角ゴ Pro W3','Hiragino Kaku Gothic Pro','メイリオ',Meiryo,'ＭＳ Ｐゴシック',sans-serif;
+			color: #000;
+			background-color: #eee;
+			font-size: 10pt;
+		}
+
+		fieldset {
+			margin-bottom: 10px;
+			padding: 5px 10px;
+			border: 1px solid #777;
+		}
+
+		legend {
+			padding: 0 5px;
+			color: #777;
+			font-size: 11pt;
+			font-weight: bold;
+		}
+
+		label {
+			color: #777;
+			font-weight: bold;
+		}
+
+		#connectionStatus {
+			font-weight: bold;
+		}
+
+		#content {
+			padding: 10px;
+		}
+
+		#serverUrl {
+			width: 225px;
+			padding: 1px 3px;
+			border: 1px solid #999;
+		}
+
+		#disconnectButton {
+			display: none;
+		}
+
+		#requestArea textarea {
+			min-width: 300px;
+			height: 2em;
+			padding: 0 3px;
+			line-height: 150%;
+		}
+
+		#messages {
+			height: 300px;
+			margin: 5px 0;
+			padding: 0 5px;
+			overflow: auto;
+			border: 1px dotted #777;
+			background-color: #fff;
+			line-height: 150%;
+		}
+
+		#messages pre {
+			width: 100%;
+			color: #000;
+		}
+
+		#messages pre.sent {
+			color: #f63;
+		}
+
+		#aid {
+			width: 20em;
+		}
+	</style>
+</head>
+<body>
+<div id="content">
+	<fieldset>
+		<legend>Server Addresses</legend>
+		<div>
+			<label>Synergy:</label>
+			<input type="text" id="serverUrl" value="ws://localhost:4545/client">
+			<button id="connectButton">Open</button>
+			<button id="disconnectButton">Close</button>
+		</div>
+		<div>
+			<label>Status:</label>
+			<span id="connectionStatus">CLOSED</span>
+		</div>
+		<hr>
+		<div>
+			<label>Auth:</label>
+			<input type="text" id="authServerUrl" value="http://localhost:7004">
+		</div>
+	</fieldset>
+	<fieldset>
+		<legend>aid</legend>
+		<div>
+			<label for="username">Username:</label>
+			<input type="text" id="username" value="JCharante">
+			<label for="password">Password:</label>
+			<input type="password" id="password" value="hunter2">
+			<button id="fetchAid">Fetch AID</button>
+		</div>
+		<div>
+			<label for="aid">aid:</label>
+			<input type="text" id="aid" value="">
+		</div>
+	</fieldset>
+	<fieldset id="requestArea">
+		<legend>Manual Request</legend>
+		<div>
+			<textarea id="sendMessage" disabled="disabled"></textarea>
+		</div>
+		<div>
+			<button id="sendButton" disabled="disabled">Send</button>
+			[Shortcut] Ctr + Enter+
+		</div>
+	</fieldset>
+	<fieldset>
+		<legend>Normal Request</legend>
+		<div class="input-group">
+			<span class="input-group-addon" id="basic-addon3">https://example.com/users/</span>
+			<input type="text" class="form-control" id="basic-url" aria-describedby="basic-addon3">
+		</div>
+	</fieldset>
+	<fieldset id="messageArea">
+		<legend>Message Log <button id="clearMessage">Clear</button></legend>
+		<div id="messages"></div>
+	</fieldset>
+</div>
+<script src="https://code.jquery.com/jquery-3.1.1.min.js" integrity="sha256-hVVnYaiADRTO2PzUGmuLJr8BLUSjGIZsDYGmIJLv2b8=" crossorigin="anonymous"></script>
+<script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js" integrity="sha384-Tc5IQib027qvyjSMfHjOMaLkfuWVxZxUPnCJA7l2mCWNIpG9mGCD8wGNIcPD7Txa" crossorigin="anonymous"></script>
+<script type="text/javascript">
+$(document).ready(function() {
+	$('#fetchAid').click(function() {
+		var endpoint = '/account/login';
+		var params = "?username=" + $('#username').val() + "&password=" + $('#password').val();
+		var url = $('#authServerUrl').val() + endpoint + params;
+		$.get(url, function( data ) {
+			$('#aid').val(data.aid);
+		});
+	});
+})
+</script>
+<script type="text/javascript">
+	var ws = null;
+	var connected = false;
+
+	var serverUrl;
+	var connectionStatus;
+	var sendMessage;
+
+	var connectButton;
+	var disconnectButton;
+	var sendButton;
+
+	var open = function() {
+		var url = serverUrl.val();
+		ws = new WebSocket(url);
+		ws.onopen = onOpen;
+		ws.onclose = onClose;
+		ws.onmessage = onMessage;
+		ws.onerror = onError;
+
+		connectionStatus.text('OPENING ...');
+		serverUrl.attr('disabled', 'disabled');
+		connectButton.hide();
+		disconnectButton.show();
+	};
+
+	var close = function() {
+		if (ws) {
+			console.log('CLOSING ...');
+			ws.close();
+		}
+		connected = false;
+		connectionStatus.text('CLOSED');
+
+		serverUrl.removeAttr('disabled');
+		connectButton.show();
+		disconnectButton.hide();
+		sendMessage.attr('disabled', 'disabled');
+		sendButton.attr('disabled', 'disabled');
+	};
+
+	var clearLog = function() {
+		$('#messages').html('');
+	};
+
+	var onOpen = function() {
+		console.log('OPENED: ' + serverUrl.val());
+		connected = true;
+		connectionStatus.text('OPENED');
+		sendMessage.removeAttr('disabled');
+		sendButton.removeAttr('disabled');
+
+		var message = JSON.stringify({
+			aid: $('#aid').val(),
+			request: 'register'
+		});
+
+		ws.send(message);
+		addMessage(message, 'SENT');
+	};
+
+	var onClose = function() {
+		console.log('CLOSED: ' + serverUrl.val());
+		ws = null;
+		close();
+	};
+
+	var onMessage = function(event) {
+		var data = event.data;
+		addMessage(data);
+	};
+
+	var onError = function(event) {
+		alert(event.data);
+	};
+
+	var addMessage = function(data, type) {
+		var msg = $('<pre>').text(data);
+		if (type === 'SENT') {
+			msg.addClass('sent');
+		}
+		var messages = $('#messages');
+		messages.append(msg);
+
+		var msgBox = messages.get(0);
+		while (msgBox.childNodes.length > 1000) {
+			msgBox.removeChild(msgBox.firstChild);
+		}
+		msgBox.scrollTop = msgBox.scrollHeight;
+	};
+
+	WebSocketClient = {
+		init: function() {
+			serverUrl = $('#serverUrl');
+			connectionStatus = $('#connectionStatus');
+			sendMessage = $('#sendMessage');
+
+			connectButton = $('#connectButton');
+			disconnectButton = $('#disconnectButton');
+			sendButton = $('#sendButton');
+
+			connectButton.click(function(e) {
+				close();
+				open();
+			});
+
+			disconnectButton.click(function(e) {
+				close();
+			});
+
+			sendButton.click(function(e) {
+				var msg = $('#sendMessage').val();
+				addMessage(msg, 'SENT');
+				ws.send(msg);
+			});
+
+			$('#clearMessage').click(function(e) {
+				clearLog();
+			});
+
+			var isCtrl;
+			sendMessage.keyup(function (e) {
+				if(e.which == 17) isCtrl=false;
+			}).keydown(function (e) {
+				if(e.which == 17) isCtrl=true;
+				if(e.which == 13 && isCtrl == true) {
+					sendButton.click();
+					return false;
+				}
+			});
+		}
+	};
+
+	$(function() {
+		WebSocketClient.init();
+	});
+</script>
+</body></html>
