@@ -1,25 +1,9 @@
 import asyncio
-import html
-import json
-import requests
+import uuid
 import websockets
-import os
+import util
 import aiohttp
-from typing import List, Dict, Tuple, Set
-
-
-def loads(x: str):
-	try:
-		return json.loads(x)
-	except:
-		return {}
-
-
-def dumps(x: dict):
-	try:
-		return json.dumps(x)
-	except:
-		return "{}"
+from typing import List, Set
 
 
 class Client:
@@ -33,7 +17,7 @@ class Client:
 		Sends the client a message notifying them that they've been authenticated.
 		:return:
 		"""
-		await self.socket.send(dumps({
+		await self.socket.send(util.dumps({
 			'request': 'authenticate',
 			'authenticated': True,
 		}))
@@ -44,7 +28,7 @@ class Client:
 		:param rooms:
 		:return:
 		"""
-		await self.socket.send(dumps({
+		await self.socket.send(util.dumps({
 			'request': 	'room_list',
 			'rooms': rooms
 		}))
@@ -55,7 +39,7 @@ class Client:
 		:param x:
 		:return:
 		"""
-		await self.socket.send(dumps(x))
+		await self.socket.send(util.dumps(x))
 
 
 class Room:
@@ -126,7 +110,7 @@ class Master:
 		self.authenticated = False
 
 	async def send_dict(self, x: dict):
-		await self.socket.send(dumps(x))
+		await self.socket.send(util.dumps(x))
 
 	async def register(self, request: dict) -> None:
 		if self.authenticated is False:
@@ -141,6 +125,7 @@ class Master:
 					self.privileges = auth_server_response.get('privileges', {})
 					if self.privileges.get('Synergy', {}).get('canBeMaster', False):
 						self.authenticated = True
+						self.synergy.master_connections.append(self)
 		await self.send_dict({
 			'authenticated': self.authenticated
 		})
@@ -151,7 +136,7 @@ class Master:
 			room_name = request.get('room_name', None)
 			default_room = request.get('default_room', False)
 			if type(room_name) == str and type(default_room) == bool:
-				self.synergy.create_room(room_name, default_room)
+				await self.synergy.create_room(room_name, default_room)
 		return
 
 	async def add_to_room(self, request: dict) -> None:
@@ -166,7 +151,7 @@ class Master:
 					room.add_member(aid)
 		return
 
-	async def room_list(self, request: dict) -> None:
+	async def send_room_list(self) -> None:
 		if self.authenticated:
 			await self.send_dict({
 				'route': 'room_list',
@@ -175,38 +160,25 @@ class Master:
 		return
 
 	async def on_message(self, string: str):
-		request = loads(string)
+		request = util.loads(string)
 		print(request)
 
-		routes = {
-			'register': self.register,
-			'create_room': self.create_room,
-			'room_list': self.room_list,
-			'add_to_room': self.add_to_room
-		}
-		"""
-		if request.get('route', None) is not None:
-			try:
-				await routes[request['route']](request)
-			except:
-				pass
-		"""
 		route = request.get('route', None)
 		if route == 'register':
 			await self.register(request)
 		elif route == 'create_room':
 			await self.create_room(request)
 		elif route == 'room_list':
-			await self.room_list(request)
+			await self.send_room_list()
 		elif route == 'add_to_room':
 			await self.add_to_room(request)
 
+
 class SynergyServer:
-	def __init__(self, client_port=4545, master_port=4546, authentication_server_address='http://localhost:7004'):
+	def __init__(self, port=4545, authentication_server_address='http://localhost:7004'):
 		"""
 		Library for creating chat systems for games.
-		:param client_port: The port for the client websocket connections
-		:param master_port: The port for the websocket connection used for managing Synergy (creating/removing rooms, adding/removing clients from rooms)
+		:param port: The port for the websocket connections
 		:param authentication_server_address: The address of the authentication server, explained below.
 		"""
 		self.rooms = {}
@@ -215,8 +187,9 @@ class SynergyServer:
 
 		self.authentication_server_address = authentication_server_address
 
-		self.client_port = client_port
-		self.master_port = master_port
+		self.port = port
+
+		self.master_connections = []
 
 	def start(self) -> None:
 		"""
@@ -224,9 +197,9 @@ class SynergyServer:
 		:return:
 		"""
 
-		print("Starting Websocket Server on port {}".format(self.client_port))
+		print("Starting Websocket Server on port {}".format(self.port))
 
-		start_server = websockets.serve(self.on_new_connection, 'localhost', self.client_port)
+		start_server = websockets.serve(self.on_new_connection, 'localhost', self.port)
 
 		asyncio.get_event_loop().run_until_complete(start_server)
 		asyncio.get_event_loop().run_forever()
@@ -248,7 +221,7 @@ class SynergyServer:
 
 		async with aiohttp.ClientSession() as session:
 			async with session.get(f'{self.authentication_server_address}/users/{aid}/username') as resp:
-				return loads(await resp.text())
+				return util.loads(await resp.text())
 
 	async def get_privileges(self, aid: str) -> dict:
 		"""
@@ -259,7 +232,7 @@ class SynergyServer:
 
 		async with aiohttp.ClientSession() as session:
 			async with session.get(f'{self.authentication_server_address}/users/{aid}/privileges') as resp:
-				return loads(await resp.text())
+				return util.loads(await resp.text())
 
 	def get_rooms_client_is_in(self, client: Client) -> List[str]:
 		"""
@@ -303,7 +276,7 @@ class SynergyServer:
 					string = await websocket.recv()
 					if aid is None:
 						# Client is not authenticated
-						request = loads(string)
+						request = util.loads(string)
 						request_type = request.get('request', '')
 						if request_type == 'authenticate':
 							alleged_aid = request.get('aid', '')
@@ -319,7 +292,7 @@ class SynergyServer:
 								await self.add_authenticated_client(client)
 					else:
 						# Client is authenticated
-						request = loads(string)
+						request = util.loads(string)
 						request_type = request.get('request', '')
 
 						if request_type == 'send_message':
@@ -348,9 +321,13 @@ class SynergyServer:
 			except:
 				pass
 			finally:
+				try:
+					self.master_connections.remove(master)
+				except:
+					pass
 				print(f'Master Connection Closed | {websocket.remote_address}')
 
-	def create_room(self, room_name, default_room=False):
+	def manually_create_room(self, room_name, default_room=False):
 		"""
 		Creates a room with the supplied room name. Optional: Whether this is a default room or not.
 		:param room_name:
@@ -364,11 +341,30 @@ class SynergyServer:
 		if default_room:
 			self.default_rooms[room_name] = room
 
+	async def create_room(self, room_name, default_room=False):
+		"""
+		Creates a room with the supplied room name. Optional: Whether this is a default room or not.
+		:param room_name:
+		:param default_room:
+		:return:
+		"""
+		room = Room(self, room_name)
+
+		self.rooms[room_name] = room
+
+		if default_room:
+			self.default_rooms[room_name] = room
+
+		# Push room list to master
+		for master_connection in self.master_connections:
+			master_connection: Master = master_connection
+			await master_connection.send_room_list()
+
 	def get_rooms(self) -> List[str]:
 		return [room_name for room_name in self.rooms]
 
-"""
-class SynergyClient:
+
+class SynergyMasterClient:
 	def __init__(self, synergy_address: str, aid: str):
 		self.synergy_address = synergy_address
 		self.aid = aid
@@ -397,7 +393,7 @@ class SynergyClient:
 		return self.room_list
 
 	async def send_dict(self, x: dict) -> None:
-		await self.socket.send(dumps(x))
+		await self.socket.send(util.dumps(x))
 		return
 
 	async def client(self):
@@ -411,17 +407,19 @@ class SynergyClient:
 						'aid': self.aid
 					})
 					string = await websocket.recv()
-					response = loads(string)
+					response = util.loads(string)
 					print(response)
 					if response.get('authenticated', False):
 						self.authenticated = True
 
+				await self.create_room(str(uuid.uuid4()))
+
 				while True:
 					string = await websocket.recv()
-					request = loads(string)
+					request = util.loads(string)
 
 					if request.get('route', None) == 'room_list':
 						self.room_list = request.get('rooms', [])
+						print(self.room_list)
 			finally:
 				print("Connection to Synergy Closed")
-"""
